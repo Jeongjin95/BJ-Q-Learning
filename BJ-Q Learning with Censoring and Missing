@@ -1,0 +1,507 @@
+
+## Stage 1
+rm(list = ls()) 
+library(data.table); library(survival) ; library(MASS) ; library("missForest") ; library(mice)
+set.seed(7777)
+n = 1000; k = 0.1 #Missing rate
+num_patients_stage1 <- n
+states_stage1 <- data.table(
+  survival.month.1st = numeric(num_patients_stage1),
+  TumorSize = numeric(num_patients_stage1),
+  Severity = numeric(num_patients_stage1),
+  Treatment = character(num_patients_stage1)
+)
+## Assign treatments based on proportions (16, 64, 16)
+num_treatment_A_stage1 <- as.integer(num_patients_stage1 * 0.16)
+num_treatment_B_stage1 <- as.integer(num_patients_stage1 * 0.64)
+num_placebo_stage1 <- num_patients_stage1 - num_treatment_A_stage1 - num_treatment_B_stage1
+treatment_stage1 <- c(
+  rep("A", num_treatment_A_stage1),
+  rep("B", num_treatment_B_stage1),
+  rep("P", num_placebo_stage1)
+)
+states_stage1$Treatment <- treatment_stage1
+
+## Define patient characteristics and survival rules for the first stage
+states_stage1$TumorSize[states_stage1$Treatment == "A"] <- runif(num_treatment_A_stage1, min = 5, max = 10)
+states_stage1$TumorSize[states_stage1$Treatment == "B"] <- runif(num_treatment_B_stage1, min = 3, max = 6)
+states_stage1$TumorSize[states_stage1$Treatment == "P"] <- runif(num_placebo_stage1, min = 1, max = 3)
+
+states_stage1$Severity[states_stage1$Treatment == "A"] <- 3
+states_stage1$Severity[states_stage1$Treatment == "B"] <- 2
+states_stage1$Severity[states_stage1$Treatment == "P"] <- 1
+
+states_stage1$survival.month.1st =  30 - 0.5 * states_stage1$TumorSize - 5 * states_stage1$Severity + rnorm(num_patients_stage1 ,0,1)
+head(states_stage1)
+tail(states_stage1)
+
+################################################################################
+# STATE 2 with no censoring
+num_patients_stage2 <- n
+states_stage2 <- data.table(
+  survival.month.2nd = numeric(num_patients_stage2),
+  TumorSize = numeric(num_patients_stage2),
+  Severity = numeric(num_patients_stage2),
+  Treatment = character(num_patients_stage2)
+)
+# Assign treatments based on proportions (8, 40, 48)
+num_treatment_A_stage2 <- as.integer(num_patients_stage2 * 0.08)
+num_treatment_B_stage2 <- as.integer(num_patients_stage2 * 0.40)
+num_placebo_stage2 <- num_patients_stage2 - num_treatment_A_stage2 - num_treatment_B_stage2
+
+treatment_stage2 <- c(
+  rep("A", num_treatment_A_stage2),
+  rep("B", num_treatment_B_stage2),
+  rep("P", num_placebo_stage2)
+)
+
+states_stage2$Treatment <- treatment_stage2
+
+# Define patient characteristics and survival rules for the second stage
+states_stage2$TumorSize[states_stage2$Treatment == "A"] <- runif(num_treatment_A_stage2, min = 5, max = 10)
+states_stage2$TumorSize[states_stage2$Treatment == "B"] <- runif(num_treatment_B_stage2, min = 3, max = 6)
+states_stage2$TumorSize[states_stage2$Treatment == "P"] <- runif(num_placebo_stage2, min = 1, max = 3)
+
+states_stage2$Severity[states_stage2$Treatment == "A"] <- 3
+states_stage2$Severity[states_stage2$Treatment == "B"] <- 2
+states_stage2$Severity[states_stage2$Treatment == "P"] <- 1
+
+states_stage2$survival.month.2nd =  30 - 0.5 * states_stage2$TumorSize - 5 * states_stage2$Severity + rnorm(num_patients_stage1 ,0,1)
+head(states_stage2)
+tail(states_stage2)
+
+combined_data = cbind(states_stage1,states_stage2)
+combined_data$Treatment_Combination <- paste0(states_stage1$Treatment, states_stage2$Treatment)
+combined_data$Survival.sum = combined_data$survival.month.1st+combined_data$survival.month.2nd
+C.data = data.frame(combined_data$Treatment_Combination,as.numeric(combined_data$Survival.sum))
+head(C.data)
+head(combined_data)
+
+
+################################################################################
+## Step 2 with 50 censoring 
+num_patients_stage2 <- n
+states_stage2 <- data.table(
+  survival.month.2nd = numeric(num_patients_stage2),
+  TumorSize = numeric(num_patients_stage2),
+  Severity = numeric(num_patients_stage2),
+  Treatment = character(num_patients_stage2)
+)
+# Assign treatments based on proportions (8, 40, 48)
+num_treatment_A_stage2 <- as.integer(num_patients_stage2 * 0.08)
+num_treatment_B_stage2 <- as.integer(num_patients_stage2 * 0.40)
+num_placebo_stage2 <- num_patients_stage2 - num_treatment_A_stage2 - num_treatment_B_stage2
+
+treatment_stage2 <- c(
+  rep("A", num_treatment_A_stage2),
+  rep("B", num_treatment_B_stage2),
+  rep("P", num_placebo_stage2)
+)
+
+states_stage2$Treatment <- treatment_stage2
+
+# Define patient characteristics and survival rules for the second stage
+states_stage2$TumorSize[states_stage2$Treatment == "A"] <- runif(num_treatment_A_stage2, min = 5, max = 10)
+states_stage2$TumorSize[states_stage2$Treatment == "B"] <- runif(num_treatment_B_stage2, min = 3, max = 6)
+states_stage2$TumorSize[states_stage2$Treatment == "P"] <- runif(num_placebo_stage2, min = 1, max = 3)
+
+states_stage2$Severity[states_stage2$Treatment == "A"] <- 3
+states_stage2$Severity[states_stage2$Treatment == "B"] <- 2
+states_stage2$Severity[states_stage2$Treatment == "P"] <- 1
+
+#Missing
+states_stage2$Severity = as.factor(states_stage2$Severity)
+dat.mis <- prodNA(states_stage2[,c(2,3)], noNA = k)
+init = mice(dat.mis, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+meth[c("TumorSize")]="pmm" 
+meth[c("Severity")]="polyreg"
+imputed = mice(data.frame(dat.mis), method=meth, m=5, seed = 1)
+imputed <- complete(imputed)
+head(imputed)
+states_stage2$TumorSize = imputed$TumorSize
+states_stage2$Severity = as.numeric(imputed$Severity)
+
+states_stage2$survival.month.2nd =  30 - 0.5 * states_stage2$TumorSize - 5 * states_stage2$Severity+ rnorm(num_patients_stage1 ,0,1)
+Censoring = runif(num_patients_stage2,10,30)
+delta = c(ifelse(states_stage2$survival.month.2nd <= Censoring, 1, 0))
+mean(delta)
+states_stage2$survival.new = c(pmin(states_stage2$survival.month.2nd, Censoring))
+
+combined_data = cbind(states_stage1,states_stage2)
+combined_data$Treatment_Combination <- paste0(states_stage1$Treatment, states_stage2$Treatment)
+combined_data$Survival.sum = combined_data$survival.month.1st+combined_data$survival.new
+Cen.data = data.frame(combined_data$Treatment_Combination,as.numeric(combined_data$Survival.sum))
+head(combined_data)
+
+
+################################################################################
+## Step 2 with 50 censoring - Buckley-James Method
+num_patients_stage2 <- n
+states_stage2 <- data.table(
+  survival.month.2nd = numeric(num_patients_stage2),
+  TumorSize = numeric(num_patients_stage2),
+  Severity = numeric(num_patients_stage2),
+  Treatment = character(num_patients_stage2)
+)
+# Assign treatments based on proportions (8, 40, 48)
+num_treatment_A_stage2 <- as.integer(num_patients_stage2 * 0.08)
+num_treatment_B_stage2 <- as.integer(num_patients_stage2 * 0.40)
+num_placebo_stage2 <- num_patients_stage2 - num_treatment_A_stage2 - num_treatment_B_stage2
+
+treatment_stage2 <- c(
+  rep("A", num_treatment_A_stage2),
+  rep("B", num_treatment_B_stage2),
+  rep("P", num_placebo_stage2)
+)
+
+states_stage2$Treatment <- treatment_stage2
+
+# Define patient characteristics and survival rules for the second stage
+states_stage2$TumorSize[states_stage2$Treatment == "A"] <- runif(num_treatment_A_stage2, min = 5, max = 10)
+states_stage2$TumorSize[states_stage2$Treatment == "B"] <- runif(num_treatment_B_stage2, min = 3, max = 6)
+states_stage2$TumorSize[states_stage2$Treatment == "P"] <- runif(num_placebo_stage2, min = 1, max = 3)
+
+states_stage2$Severity[states_stage2$Treatment == "A"] <- 3
+states_stage2$Severity[states_stage2$Treatment == "B"] <- 2
+states_stage2$Severity[states_stage2$Treatment == "P"] <- 1
+
+#Missing
+states_stage2$Severity = as.factor(states_stage2$Severity)
+dat.mis <- prodNA(states_stage2[,c(2,3)], noNA = k)
+init = mice(dat.mis, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+meth[c("TumorSize")]="pmm" 
+meth[c("Severity")]="polyreg"
+imputed = mice(data.frame(dat.mis), method=meth, m=5, seed = 1)
+imputed <- complete(imputed)
+head(imputed)
+states_stage2$TumorSize = imputed$TumorSize
+states_stage2$Severity = as.numeric(imputed$Severity)
+
+states_stage2$survival.month.2nd =  30 - 0.5 * states_stage2$TumorSize - 5 * states_stage2$Severity +rnorm(num_patients_stage1 ,0,1)
+Censoring = runif(num_patients_stage2,10,30)
+delta = c(ifelse(states_stage2$survival.month.2nd <= Censoring, 1, 0))
+mean(delta)
+states_stage2$y = c(pmin(states_stage2$survival.month.2nd, Censoring))
+states_stage2$delta = delta
+states_stage2
+
+bjaft = function(dt, tol = 1e-3, max.iter = 100) {
+  Y = dt$y; delta = dt$delta; x = cbind(dt$TumorSize, dt$Severity)
+  old.beta = lm(log(Y) ~ x)$coef[-1]
+  
+  err = 10; iter = 0
+  while (max.iter > iter & err > tol) {
+    xbeta = c(x%*%old.beta)
+    e = log(Y) - xbeta
+    es = sort(e)
+    sfit = survfit(Surv(e, delta) ~ 1)
+    Fhat = 1-approx(x=sfit$time, y=sfit$surv, xout=es)$y
+    dF = diff(c(0,Fhat))
+    denom = 1-Fhat # rev(cumsum(rev(dF)))
+    num = rev(cumsum(rev(es*dF)))
+    Yimp = (num/pmax(tol,denom))[rank(e)] +xbeta
+    Yhat = log(Y)*delta + (1-delta)*Yimp
+    
+    new.beta = lm(Yhat ~ x)$coef[-1]
+    err = max(abs(new.beta - old.beta))
+    iter = iter + 1
+    old.beta = new.beta
+  }
+  list(coef = round(new.beta,3), iter = iter, Yhat=Yhat)
+}
+tail(exp(bjaft(states_stage2)$Yhat))
+tail(states_stage2$y)
+tail(states_stage2$survival.month.2nd)
+tail(states_stage2$delta)
+
+combined_data$Treatment_Combination <- paste0(states_stage1$Treatment, states_stage2$Treatment)
+combined_data$Survival.sum = combined_data$survival.month.1st+exp(bjaft(states_stage2)$Yhat)
+Imputed.data = data.frame(combined_data$Treatment_Combination,as.numeric(combined_data$Survival.sum))
+
+################################################################################
+## Step 2 with 30 censoring 
+num_patients_stage2 <- n
+states_stage2 <- data.table(
+  survival.month.2nd = numeric(num_patients_stage2),
+  TumorSize = numeric(num_patients_stage2),
+  Severity = numeric(num_patients_stage2),
+  Treatment = character(num_patients_stage2)
+)
+# Assign treatments based on proportions (8, 40, 48)
+num_treatment_A_stage2 <- as.integer(num_patients_stage2 * 0.08)
+num_treatment_B_stage2 <- as.integer(num_patients_stage2 * 0.40)
+num_placebo_stage2 <- num_patients_stage2 - num_treatment_A_stage2 - num_treatment_B_stage2
+
+treatment_stage2 <- c(
+  rep("A", num_treatment_A_stage2),
+  rep("B", num_treatment_B_stage2),
+  rep("P", num_placebo_stage2)
+)
+
+states_stage2$Treatment <- treatment_stage2
+
+# Define patient characteristics and survival rules for the second stage
+states_stage2$TumorSize[states_stage2$Treatment == "A"] <- runif(num_treatment_A_stage2, min = 5, max = 10)
+states_stage2$TumorSize[states_stage2$Treatment == "B"] <- runif(num_treatment_B_stage2, min = 3, max = 6)
+states_stage2$TumorSize[states_stage2$Treatment == "P"] <- runif(num_placebo_stage2, min = 1, max = 3)
+
+states_stage2$Severity[states_stage2$Treatment == "A"] <- 3
+states_stage2$Severity[states_stage2$Treatment == "B"] <- 2
+states_stage2$Severity[states_stage2$Treatment == "P"] <- 1
+
+#Missing
+states_stage2$Severity = as.factor(states_stage2$Severity)
+dat.mis <- prodNA(states_stage2[,c(2,3)], noNA = k)
+init = mice(dat.mis, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+meth[c("TumorSize")]="pmm" 
+meth[c("Severity")]="polyreg"
+imputed = mice(data.frame(dat.mis), method=meth, m=5, seed = 1)
+imputed <- complete(imputed)
+head(imputed)
+states_stage2$TumorSize = imputed$TumorSize
+states_stage2$Severity = as.numeric(imputed$Severity)
+
+states_stage2$survival.month.2nd =  30 - 0.5 * states_stage2$TumorSize - 5 * states_stage2$Severity+ rnorm(num_patients_stage1 ,0,1)
+Censoring = runif(num_patients_stage2,5,30)
+delta = c(ifelse(states_stage2$survival.month.2nd <= Censoring, 1, 0))
+mean(delta)
+states_stage2$survival.new = c(pmin(states_stage2$survival.month.2nd, Censoring))
+
+combined_data = cbind(states_stage1,states_stage2)
+combined_data$Treatment_Combination <- paste0(states_stage1$Treatment, states_stage2$Treatment)
+combined_data$Survival.sum = combined_data$survival.month.1st+combined_data$survival.new
+Cen.data.20 = data.frame(combined_data$Treatment_Combination,as.numeric(combined_data$Survival.sum))
+
+################################################################################
+## Step 2 with 20 censoring - Buckley-James Method
+num_patients_stage2 <- n
+states_stage2 <- data.table(
+  survival.month.2nd = numeric(num_patients_stage2),
+  TumorSize = numeric(num_patients_stage2),
+  Severity = numeric(num_patients_stage2),
+  Treatment = character(num_patients_stage2)
+)
+# Assign treatments based on proportions (8, 40, 48)
+num_treatment_A_stage2 <- as.integer(num_patients_stage2 * 0.08)
+num_treatment_B_stage2 <- as.integer(num_patients_stage2 * 0.40)
+num_placebo_stage2 <- num_patients_stage2 - num_treatment_A_stage2 - num_treatment_B_stage2
+
+treatment_stage2 <- c(
+  rep("A", num_treatment_A_stage2),
+  rep("B", num_treatment_B_stage2),
+  rep("P", num_placebo_stage2)
+)
+
+states_stage2$Treatment <- treatment_stage2
+
+# Define patient characteristics and survival rules for the second stage
+states_stage2$TumorSize[states_stage2$Treatment == "A"] <- runif(num_treatment_A_stage2, min = 5, max = 10)
+states_stage2$TumorSize[states_stage2$Treatment == "B"] <- runif(num_treatment_B_stage2, min = 3, max = 6)
+states_stage2$TumorSize[states_stage2$Treatment == "P"] <- runif(num_placebo_stage2, min = 1, max = 3)
+
+states_stage2$Severity[states_stage2$Treatment == "A"] <- 3
+states_stage2$Severity[states_stage2$Treatment == "B"] <- 2
+states_stage2$Severity[states_stage2$Treatment == "P"] <- 1
+
+#Missing
+states_stage2$Severity = as.factor(states_stage2$Severity)
+dat.mis <- prodNA(states_stage2[,c(2,3)], noNA = k)
+init = mice(dat.mis, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+meth[c("TumorSize")]="pmm" 
+meth[c("Severity")]="polyreg"
+imputed = mice(data.frame(dat.mis), method=meth, m=5, seed = 1)
+imputed <- complete(imputed)
+head(imputed)
+states_stage2$TumorSize = imputed$TumorSize
+states_stage2$Severity = as.numeric(imputed$Severity)
+
+states_stage2$survival.month.2nd =  30 - 0.5 * states_stage2$TumorSize - 5 * states_stage2$Severity +rnorm(num_patients_stage1 ,0,1)
+Censoring = runif(num_patients_stage2,5,30) # 10 25
+delta = c(ifelse(states_stage2$survival.month.2nd <= Censoring, 1, 0))
+mean(delta)
+states_stage2$y = c(pmin(states_stage2$survival.month.2nd, Censoring))
+states_stage2$delta = delta
+states_stage2
+
+
+bjaft = function(dt, tol = 1e-3, max.iter = 100) {
+  Y = dt$y; delta = dt$delta; x = cbind(dt$TumorSize, dt$Severity)
+  old.beta = lm(log(Y) ~ x)$coef[-1]
+  
+  err = 10; iter = 0
+  while (max.iter > iter & err > tol) {
+    xbeta = c(x%*%old.beta)
+    e = log(Y) - xbeta
+    es = sort(e)
+    sfit = survfit(Surv(e, delta) ~ 1)
+    Fhat = 1-approx(x=sfit$time, y=sfit$surv, xout=es)$y
+    dF = diff(c(0,Fhat))
+    denom = 1-Fhat # rev(cumsum(rev(dF)))
+    num = rev(cumsum(rev(es*dF)))
+    Yimp = (num/pmax(tol,denom))[rank(e)] +xbeta
+    Yhat = log(Y)*delta + (1-delta)*Yimp
+    
+    new.beta = lm(Yhat ~ x)$coef[-1]
+    err = max(abs(new.beta - old.beta))
+    iter = iter + 1
+    old.beta = new.beta
+  }
+  list(coef = round(new.beta,3), iter = iter, Yhat=Yhat)
+}
+tail(exp(bjaft(states_stage2)$Yhat))
+tail(states_stage2$y)
+tail(states_stage2$survival.month.2nd)
+tail(states_stage2$delta)
+
+combined_data$Treatment_Combination <- paste0(states_stage1$Treatment, states_stage2$Treatment)
+combined_data$Survival.sum = combined_data$survival.month.1st+exp(bjaft(states_stage2)$Yhat)
+Imputed.data.20 = data.frame(combined_data$Treatment_Combination,as.numeric(combined_data$Survival.sum))
+
+# Create boxplots for each treatment combination
+library(ggplot2)
+
+ggplot(Imputed.data.20, aes(x = factor(Imputed.data.20[,1]), y = Imputed.data.20[,2])) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Survival Times by Treatment Combination",
+    x = "Treatment Combination",
+    y = "Survival Time"
+  )
+
+
+###############################################################################################
+# Load the ggplot2 library if not already loaded
+library(ggplot2)
+
+# Create a single data frame for all your data
+combined_data <- rbind(
+  data.frame(Group = "True Survival", x = factor(C.data[,1]), y = C.data[,2]),
+  data.frame(Group = "Conventional Q (30 %)", x = factor(Cen.data.20[,1]), y = Cen.data.20[,2]),
+  data.frame(Group = "BJ-Q (30 %)", x = factor(Imputed.data.20[,1]), y = Imputed.data.20[,2]),  
+  data.frame(Group = "Conventional Q (50 %)", x = factor(Cen.data[,1]), y = Cen.data[,2]),
+  data.frame(Group = "BJ-Q (50 %)", x = factor(Imputed.data[,1]), y = Imputed.data[,2])
+)
+
+# Define the desired order of levels for the "Group" variable
+combined_data$Group <- factor(combined_data$Group, levels = c("True Survival", "Conventional Q (30 %)", "BJ-Q (30 %)", "Conventional Q (50 %)", "BJ-Q (50 %)"))
+
+# Create a box plot with facets by "Group" (C.data, Cen.data, Imputed.data)
+p <- ggplot(combined_data, aes(x = x, y = y, fill = Group)) +
+  geom_boxplot(outlier.size = 0.05, outlier.fill = "transparent") +
+  labs(
+    x = "Treatment Combination",
+    y = "Survival Time"
+  ) +
+  facet_wrap(~ Group, ncol = 5)  # Adjust the ncol parameter to 5
+
+# Customize the fill colors
+p + scale_fill_manual(values = c(
+  "True Survival" = "lightblue",
+  "Conventional Q (30 %)" = "lightgreen",
+  "BJ-Q (30 %)" = "lightgreen",  # Same color as Censoring (20 %)
+  "Conventional Q (50 %)" = "lightpink",
+  "BJ-Q (50 %)" = "lightpink"  # Same color as Censoring (50 %)
+))
+
+library(dplyr)
+
+# True Survival group
+TS <- combined_data[combined_data$Group == "True Survival", ]
+TS_summary <- TS %>%
+  group_by(x) %>%
+  summarise(
+    Mean = mean(y, na.rm = TRUE),
+    SD = sd(y, na.rm = TRUE),
+    Median = median(y, na.rm = TRUE),
+    IQR = IQR(y, na.rm = TRUE),
+    Q1 = quantile(y, 0.25, na.rm = TRUE),
+    Q3 = quantile(y, 0.75, na.rm = TRUE)
+  )
+
+# Conventional Q (30%) group
+CQ_30 <- combined_data[combined_data$Group == "Conventional Q (30 %)", ]
+CQ_30_summary <- CQ_30 %>%
+  group_by(x) %>%
+  summarise(
+    Mean = mean(y, na.rm = TRUE),
+    SD = sd(y, na.rm = TRUE),
+    Median = median(y, na.rm = TRUE),
+    IQR = IQR(y, na.rm = TRUE),
+    Q1 = quantile(y, 0.25, na.rm = TRUE),
+    Q3 = quantile(y, 0.75, na.rm = TRUE)
+  )
+
+# BJ-Q (30%) group
+BJ_Q_30 <- combined_data[combined_data$Group == "BJ-Q (30 %)", ]
+BJ_Q_30_summary <- BJ_Q_30 %>%
+  group_by(x) %>%
+  summarise(
+    Mean = mean(y, na.rm = TRUE),
+    SD = sd(y, na.rm = TRUE),
+    Median = median(y, na.rm = TRUE),
+    IQR = IQR(y, na.rm = TRUE),
+    Q1 = quantile(y, 0.25, na.rm = TRUE),
+    Q3 = quantile(y, 0.75, na.rm = TRUE)
+  )
+
+# Conventional Q (50%) group
+CQ_50 <- combined_data[combined_data$Group == "Conventional Q (50 %)", ]
+CQ_50_summary <- CQ_50 %>%
+  group_by(x) %>%
+  summarise(
+    Mean = mean(y, na.rm = TRUE),
+    SD = sd(y, na.rm = TRUE),
+    Median = median(y, na.rm = TRUE),
+    IQR = IQR(y, na.rm = TRUE),
+    Q1 = quantile(y, 0.25, na.rm = TRUE),
+    Q3 = quantile(y, 0.75, na.rm = TRUE)
+  )
+
+# BJ-Q (50%) group
+BJ_Q_50 <- combined_data[combined_data$Group == "BJ-Q (50 %)", ]
+BJ_Q_50_summary <- BJ_Q_50 %>%
+  group_by(x) %>%
+  summarise(
+    Mean = mean(y, na.rm = TRUE),
+    SD = sd(y, na.rm = TRUE),
+    Median = median(y, na.rm = TRUE),
+    IQR = IQR(y, na.rm = TRUE),
+    Q1 = quantile(y, 0.25, na.rm = TRUE),
+    Q3 = quantile(y, 0.75, na.rm = TRUE)
+  )
+
+TS_summary
+CQ_30_summary
+BJ_Q_30_summary
+CQ_50_summary
+BJ_Q_50_summary
+
+###############################################################################
+library(survminer)
+method = c(rep("TS",n),rep("Not Imputed",n))
+time = c(TS$y, CQ_30$y); status = rep(1,length(time))
+fit <- survfit(Surv(time, status) ~ method)
+survdiff(Surv(time, status) ~ method)
+
+method = c(rep("TS",n),rep("Imputed",n))
+time = c(TS$y, BJ_Q_30$y); status = rep(1,length(time))
+fit <- survfit(Surv(time, status) ~ method)
+survdiff(Surv(time, status) ~ method)
+
+method = c(rep("TS",n),rep("Not Imputed",n))
+time = c(TS$y, CQ_50$y); status = rep(1,length(time))
+fit <- survfit(Surv(time, status) ~ method)
+survdiff(Surv(time, status) ~ method)
+
+method = c(rep("TS",n),rep("Imputed",n))
+time = c(TS$y, BJ_Q_50$y); status = rep(1,length(time))
+fit <- survfit(Surv(time, status) ~ method)
+survdiff(Surv(time, status) ~ method)
