@@ -1,3 +1,3 @@
-Advancing Personalized Treatment: Novel Q-Learning Approaches for High-Dimensional Missing and Survival Data, submitted
+Advancing Personalized Treatment: Novel Q-Learning Approaches for High-Dimensional Missing and Survival Data, Submitted.
 
-Will post code after Revision
+Will post all code after revision.
