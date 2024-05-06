@@ -1,3 +1,3 @@
-Reinforcement Learning for Personalized Treatment Policies in the Context of High-Dimensional Missing and Censored Data
+Advancing Personalized Treatment: Novel Q-Learning Approaches for High-Dimensional Missing and Survival Data
 
 Will post code after Revision
