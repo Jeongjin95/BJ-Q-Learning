@@ -114,60 +114,6 @@ for (iteration in 1:num_iterations) {
 
 print(Q)
 
-Q_list <- vector("list", n)
-for (j in 1:n) {
-  Q_list[[j]] <- matrix(0, nrow = num_states, ncol = num_actions)
-}
-alpha <- 0.1  # Learning rate
-gamma <- 0.9  # Discount factor
-epsilon <- 0.2  # Epsilon for epsilon-greedy policy
-num_iterations <- 1000 # Number of iterations for Q-value updates
-for (j in 1:n){
-  for (iteration in 1:num_iterations) {
-  # Update Q-value for state 2
-  state2 <- 2
-  if (runif(1) < epsilon) {
-    # Explore: choose a random action
-    action2 <- sample(1:num_actions, 1)
-  } else {
-    # Exploit: choose the action with the highest Q-value
-    action2 <- which.max(Q[state2, ])
-  }
-  survival2 = 30 - 0.5 * Tumorsize2[j] - 5 * Severity2[j]
-  reward2 <- c(survival2, survival2, survival2)[action2] + 
-    5*c(Severity2[j]==3, Severity2[j]==2, Severity2[j]==1)[action2]
-  Q_list[[j]][state2, action2] <- (1 - alpha) * Q_list[[j]][state2, action2] + alpha * reward2
-  
-  # Update Q-value for state 1
-  state1 <- 1
-  if (runif(1) < epsilon) {
-    # Explore: choose a randoma action
-    action1 <- sample(1:num_actions, 1)
-  } else {
-    # Exploit: choose the action with the highest Q-value
-    action1 <- which.max(Q[state1, ])
-  }
-  survival1 = 30 - 0.5 * Tumorsize1[j] - 5 * Severity1[j] + rnorm(1,0,1)
-  reward1 <- c(survival1,survival1,survival1)[action1] +
-    5*c(Severity1[j]==3, Severity1[j]==2, Severity1[j]==1)[action1]
-  Q_list[[j]][state1, action1] <- (1 - alpha) * Q_list[[j]][state1, action1] + alpha * (reward1 + gamma * max(Q_list[[j]][state2, ]))
-  }
-}
-Q_list
-detach(combined_data)
-
-Optimal.policy = matrix(0,n,2)
-for (k in 1:n){
-  Optimal.policy[k,1]=which.max(Q_list[[k]][1,])
-  Optimal.policy[k,2]=which.max(Q_list[[k]][2,])
-}
-Optimal.policy
-Optimal.policy[Optimal.policy == 1] <- 'A'
-Optimal.policy[Optimal.policy == 2] <- 'B'
-Optimal.policy[Optimal.policy == 3] <- 'P'
-colnames(Optimal.policy) = c("OP.Trt1", "OP.Trt2")
-Optimal.policy
-
 cbind(combined_data, Optimal.policy)
 cbind(combined_data$Trt1,combined_data$Trt2) == Optimal.policy
 combined_data
