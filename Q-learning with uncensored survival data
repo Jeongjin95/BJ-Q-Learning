@@ -113,7 +113,3 @@ for (iteration in 1:num_iterations) {
 }
 
 print(Q)
-
-cbind(combined_data, Optimal.policy)
-cbind(combined_data$Trt1,combined_data$Trt2) == Optimal.policy
-combined_data
