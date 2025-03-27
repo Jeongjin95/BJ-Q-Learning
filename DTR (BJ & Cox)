@@ -9,7 +9,7 @@ library(survminer)
 
 # Settings
 set.seed(1111)
-n <- 200
+n <- 100
 missing_rate <- 0.5
 
 # Treatment assignment
