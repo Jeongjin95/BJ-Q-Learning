@@ -1,0 +1,180 @@
+# Clear environment
+rm(list = ls())
+
+# Libraries
+library(data.table)
+library(survival)
+library(mice)
+library(survminer)
+
+# Settings
+set.seed(1111)
+n <- 200
+missing_rate <- 0.5
+
+# Treatment assignment
+assign_treatments <- function(n, proportions) {
+  sample(c("A", "B"), size = n, replace = TRUE, prob = proportions)
+}
+
+# Covariates
+Sex <- sample(c("Male", "Female"), n, replace = TRUE)
+BloodType <- sample(c("A", "B", "AB", "O"), n, replace = TRUE)
+
+# Function to simulate one stage
+simulate_stage <- function(stage_num, Sex, BloodType) {
+  Treatment <- assign_treatments(n, c(0.5, 0.5))
+  TumorSize <- numeric(n)
+  TumorSize[Treatment == "A"] <- runif(sum(Treatment == "A"), 5, 6)
+  TumorSize[Treatment == "B"] <- runif(sum(Treatment == "B"), 3, 4)
+  Severity <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(3, 0)))
+  
+  X_extra <- model.matrix(~ Sex + BloodType)[, -1]
+  beta_extra <- rep(0.05, ncol(X_extra))
+  survival <- 20 - 2 * TumorSize - Severity + X_extra %*% beta_extra + rnorm(n, 0, 0.5)
+  
+  data.table(
+    Treatment = Treatment,
+    TumorSize = TumorSize,
+    Severity = Severity,
+    Sex = Sex,
+    BloodType = BloodType,
+    survival = as.numeric(survival)
+  )
+}
+
+# Simulate all three stages
+stage1 <- simulate_stage(1, Sex, BloodType)
+stage2 <- simulate_stage(2, Sex, BloodType)
+stage3 <- simulate_stage(3, Sex, BloodType)
+
+# Introduce missingness
+set.seed(7777)
+stage1$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
+stage2$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
+stage3$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
+
+# Impute
+combined_cov <- rbind(
+  data.table(Stage = "1", TumorSize = stage1$TumorSize, Severity = stage1$Severity),
+  data.table(Stage = "2", TumorSize = stage2$TumorSize, Severity = stage2$Severity),
+  data.table(Stage = "3", TumorSize = stage3$TumorSize, Severity = stage3$Severity)
+)
+completed <- complete(mice(combined_cov, m = 5, method = "pmm", seed = 7777))
+
+# Restore imputed values
+stage1$TumorSize <- completed$TumorSize[combined_cov$Stage == "1"]
+stage1$Severity <- completed$Severity[combined_cov$Stage == "1"]
+stage2$TumorSize <- completed$TumorSize[combined_cov$Stage == "2"]
+stage2$Severity <- completed$Severity[combined_cov$Stage == "2"]
+stage3$TumorSize <- completed$TumorSize[combined_cov$Stage == "3"]
+stage3$Severity <- completed$Severity[combined_cov$Stage == "3"]
+
+# Censoring
+censor <- runif(n, min = 5, max = 15)
+for (s in list(stage1, stage2, stage3)) {
+  s[, `:=`(
+    censored_time = pmin(survival, censor),
+    delta = as.numeric(survival <= censor)
+  )]
+}
+
+# Buckley-James AFT
+bjaft <- function(dt, tol = 1e-3, max.iter = 100) {
+  Y <- dt$y
+  delta <- dt$delta
+  x <- model.matrix(~ TumorSize + Severity + Sex + BloodType, data = dt)[, -1]
+  old.beta <- lm(log(Y) ~ x)$coef[-1]
+  iter <- 0; err <- 10
+  while (iter < max.iter & err > tol) {
+    xbeta <- c(x %*% old.beta)
+    e <- log(Y) - xbeta
+    es <- sort(e)
+    sfit <- survfit(Surv(e, delta) ~ 1)
+    Fhat <- 1 - approx(x = sfit$time, y = sfit$surv, xout = es, rule = 2, ties = "ordered")$y
+    dF <- diff(c(0, Fhat))
+    denom <- 1 - Fhat
+    num <- rev(cumsum(rev(es * dF)))
+    Yimp <- (num / pmax(tol, denom))[rank(e)] + xbeta
+    Yhat <- log(Y) * delta + (1 - delta) * Yimp
+    new.beta <- lm(Yhat ~ x)$coef[-1]
+    err <- max(abs(new.beta - old.beta))
+    iter <- iter + 1
+    old.beta <- new.beta
+  }
+  list(Yhat = Yhat)
+}
+
+BJ.1 <- exp(bjaft(stage1[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
+BJ.2 <- exp(bjaft(stage2[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
+BJ.3 <- exp(bjaft(stage3[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
+
+# Cox Imputation
+cox_imp <- function(data) {
+  fit <- coxph(Surv(censored_time, delta) ~ TumorSize + Severity + Sex + BloodType, data = data)
+  lp <- predict(fit, type = "lp")
+  base_surv <- basehaz(fit, centered = FALSE)
+  sapply(lp, function(lpv) sum(diff(c(0, base_surv$time)) * exp(-base_surv$hazard * exp(lpv))))
+}
+
+Cox.1 <- cox_imp(stage1)
+Cox.2 <- cox_imp(stage2)
+Cox.3 <- cox_imp(stage3)
+
+# Combine for testing
+true_total <- stage1$survival + stage2$survival + stage3$survival
+bj_total <- BJ.1 + BJ.2 + BJ.3
+cox_total <- Cox.1 + Cox.2 + Cox.3
+
+# Log-rank tests
+method_bj <- c(rep("True", n), rep("BJ-Q", n))
+method_cox <- c(rep("True", n), rep("Cox-Q", n))
+
+logrank_bj <- survdiff(Surv(c(true_total, bj_total), rep(1, 2 * n)) ~ method_bj)
+logrank_cox <- survdiff(Surv(c(true_total, cox_total), rep(1, 2 * n)) ~ method_cox)
+
+print(logrank_bj)
+print(logrank_cox)
+
+
+# Combine treatment labels
+treatment_comb <- paste0(stage1$Treatment, stage2$Treatment, stage3$Treatment)
+
+# Combine data for plotting
+plot_data <- data.table(
+  Treatment_Combination = treatment_comb,
+  True_Total = true_total,
+  BJ_Total = bj_total,
+  Cox_Total = cox_total
+)
+
+# Define common y-axis limits
+ymin <- min(c(plot_data$True_Total, plot_data$BJ_Total, plot_data$Cox_Total))
+ymax <- max(c(plot_data$True_Total, plot_data$BJ_Total, plot_data$Cox_Total))
+
+# Plot 1: True survival
+p1 <- ggplot(plot_data, aes(x = Treatment_Combination, y = True_Total)) +
+  geom_boxplot(outlier.size = 0.3) +
+  labs(title = "True Survival", x = "Treatment Combination", y = "Survival Time") +
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Plot 2: BJ-Q imputed
+p2 <- ggplot(plot_data, aes(x = Treatment_Combination, y = BJ_Total)) +
+  geom_boxplot(outlier.size = 0.3) +
+  labs(title = "BJ-Q", x = "Treatment Combination", y = "Survival Time") +
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Plot 3: Cox-Q imputed
+p3 <- ggplot(plot_data, aes(x = Treatment_Combination, y = Cox_Total)) +
+  geom_boxplot(outlier.size = 0.3) +
+  labs(title = "Cox-Q", x = "Treatment Combination", y = "Survival Time") +
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Combine plots horizontally
+library(patchwork)
+combined_plot <- p1 + p2 + p3 + plot_layout(ncol = 3)
+print(combined_plot)
+
