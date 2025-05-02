@@ -9,7 +9,7 @@ library(survminer)
 
 # Settings
 set.seed(1111)
-n <- 100
+n <- 200
 missing_rate <- 0.5
 
 # Treatment assignment
@@ -27,16 +27,16 @@ simulate_stage <- function(stage_num, Sex, BloodType) {
   TumorSize <- numeric(n)
   TumorSize[Treatment == "A"] <- runif(sum(Treatment == "A"), 5, 6)
   TumorSize[Treatment == "B"] <- runif(sum(Treatment == "B"), 3, 4)
-  Severity <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(3, 0)))
+  treatment <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(3, 0)))
   
   X_extra <- model.matrix(~ Sex + BloodType)[, -1]
   beta_extra <- rep(0.05, ncol(X_extra))
-  survival <- 20 - 2 * TumorSize - Severity + X_extra %*% beta_extra + rnorm(n, 0, 0.5)
+  survival <- 20 - 2 * TumorSize - treatment + X_extra %*% beta_extra + rnorm(n, 0, 0.5)
   
   data.table(
     Treatment = Treatment,
     TumorSize = TumorSize,
-    Severity = Severity,
+    treatment = treatment,
     Sex = Sex,
     BloodType = BloodType,
     survival = as.numeric(survival)
@@ -56,19 +56,19 @@ stage3$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
 
 # Impute
 combined_cov <- rbind(
-  data.table(Stage = "1", TumorSize = stage1$TumorSize, Severity = stage1$Severity),
-  data.table(Stage = "2", TumorSize = stage2$TumorSize, Severity = stage2$Severity),
-  data.table(Stage = "3", TumorSize = stage3$TumorSize, Severity = stage3$Severity)
+  data.table(Stage = "1", TumorSize = stage1$TumorSize, treatment = stage1$treatment),
+  data.table(Stage = "2", TumorSize = stage2$TumorSize, treatment = stage2$treatment),
+  data.table(Stage = "3", TumorSize = stage3$TumorSize, treatment = stage3$treatment)
 )
 completed <- complete(mice(combined_cov, m = 5, method = "pmm", seed = 7777))
 
 # Restore imputed values
 stage1$TumorSize <- completed$TumorSize[combined_cov$Stage == "1"]
-stage1$Severity <- completed$Severity[combined_cov$Stage == "1"]
+stage1$treatment <- completed$treatment[combined_cov$Stage == "1"]
 stage2$TumorSize <- completed$TumorSize[combined_cov$Stage == "2"]
-stage2$Severity <- completed$Severity[combined_cov$Stage == "2"]
+stage2$treatment <- completed$treatment[combined_cov$Stage == "2"]
 stage3$TumorSize <- completed$TumorSize[combined_cov$Stage == "3"]
-stage3$Severity <- completed$Severity[combined_cov$Stage == "3"]
+stage3$treatment <- completed$treatment[combined_cov$Stage == "3"]
 
 # Censoring
 censor <- runif(n, min = 5, max = 15)
@@ -83,7 +83,7 @@ for (s in list(stage1, stage2, stage3)) {
 bjaft <- function(dt, tol = 1e-3, max.iter = 100) {
   Y <- dt$y
   delta <- dt$delta
-  x <- model.matrix(~ TumorSize + Severity + Sex + BloodType, data = dt)[, -1]
+  x <- model.matrix(~ TumorSize + treatment + Sex + BloodType, data = dt)[, -1]
   old.beta <- lm(log(Y) ~ x)$coef[-1]
   iter <- 0; err <- 10
   while (iter < max.iter & err > tol) {
@@ -105,13 +105,13 @@ bjaft <- function(dt, tol = 1e-3, max.iter = 100) {
   list(Yhat = Yhat)
 }
 
-BJ.1 <- exp(bjaft(stage1[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
-BJ.2 <- exp(bjaft(stage2[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
-BJ.3 <- exp(bjaft(stage3[, .(y = censored_time, delta, TumorSize, Severity, Sex, BloodType)])$Yhat)
+BJ.1 <- exp(bjaft(stage1[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
+BJ.2 <- exp(bjaft(stage2[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
+BJ.3 <- exp(bjaft(stage3[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
 
 # Cox Imputation
 cox_imp <- function(data) {
-  fit <- coxph(Surv(censored_time, delta) ~ TumorSize + Severity + Sex + BloodType, data = data)
+  fit <- coxph(Surv(censored_time, delta) ~ TumorSize + treatment + Sex + BloodType, data = data)
   lp <- predict(fit, type = "lp")
   base_surv <- basehaz(fit, centered = FALSE)
   sapply(lp, function(lpv) sum(diff(c(0, base_surv$time)) * exp(-base_surv$hazard * exp(lpv))))
