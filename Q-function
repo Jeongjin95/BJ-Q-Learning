@@ -27,7 +27,7 @@ simulate_stage <- function(stage_num, Sex, BloodType) {
   TumorSize <- numeric(n)
   TumorSize[Treatment == "A"] <- runif(sum(Treatment == "A"), 5, 6)
   TumorSize[Treatment == "B"] <- runif(sum(Treatment == "B"), 3, 4)
-  treatment <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(3, 0)))
+  treatment <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(1, 0)))
   
   X_extra <- model.matrix(~ Sex + BloodType)[, -1]
   beta_extra <- rep(0.05, ncol(X_extra))
