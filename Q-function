@@ -1,180 +1,229 @@
-# Clear environment
-rm(list = ls())
-
-# Libraries
-library(data.table)
+library(bujar)
 library(survival)
-library(mice)
-library(survminer)
+library(ggplot2)
+library(tidyr)
 
-# Settings
-set.seed(1111)
-n <- 200
-missing_rate <- 0.5
+set.seed(1234)
 
-# Treatment assignment
-assign_treatments <- function(n, proportions) {
-  sample(c("A", "B"), size = n, replace = TRUE, prob = proportions)
+# Sample size and covariates
+n <- 1000
+Sex <- rbinom(n, 1, 0.5)
+TumorSize <- runif(n, -1, 3)
+
+# True parameters
+beta_0 <- 10
+beta_1 <- 0.1
+beta_2 <- -1
+gamma_1 <- 0.01
+gamma_2 <- 1.3
+
+# True Q-values for treatment A and B
+Q_A_true <- beta_0 + beta_1 * Sex + beta_2 * TumorSize + gamma_1 + gamma_2 * TumorSize
+Q_B_true <- beta_0 + beta_1 * Sex + beta_2 * TumorSize
+
+# Add noise and assign treatment
+epsilon <- rnorm(n)
+A <- rbinom(n, 1, 0.5)
+
+# Simulated survival and censoring
+T_true <- ifelse(A == 1, Q_A_true, Q_B_true) + epsilon
+C <- runif(n, quantile(T_true, 0.2), quantile(T_true, 0.8))
+Y <- pmin(T_true, C)
+delta <- as.numeric(T_true <= C)
+mean(delta)
+
+# Create full dataset
+df <- data.frame(Sex, TumorSize, A, T_obs = Y, delta, Q_A_true, Q_B_true)
+df_A <- df[df$A == 1, ]
+df_B <- df[df$A == 0, ]
+
+# Design matrices for bujar
+x_A <- as.matrix(df_A[, c("Sex", "TumorSize")])
+x_B <- as.matrix(df_B[, c("Sex", "TumorSize")])
+x_all <- as.matrix(df[, c("Sex", "TumorSize")])
+
+# Fit BJ using bujar
+fit_A_bj <- bujar(y = log(df_A$T_obs), cens = df_A$delta, x = x_A, learner = "linear.regression", tuning = FALSE)
+fit_B_bj <- bujar(y = log(df_B$T_obs), cens = df_B$delta, x = x_B, learner = "linear.regression", tuning = FALSE)
+
+# Predict Q-values and exponentiate
+Q_A_bj <- exp(predict(fit_A_bj, newx = x_all))
+Q_B_bj <- exp(predict(fit_B_bj, newx = x_all))
+
+# Fit Cox models
+fit_A_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_A)
+fit_B_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_B)
+lp_A <- predict(fit_A_cox, newdata = df, type = "lp")
+lp_B <- predict(fit_B_cox, newdata = df, type = "lp")
+base_A <- basehaz(fit_A_cox, centered = FALSE)
+base_B <- basehaz(fit_B_cox, centered = FALSE)
+
+# Compute expected survival from Cox model
+compute_surv <- function(lp, base) {
+  sapply(lp, function(lpi) {
+    sum(diff(c(0, base$time)) * exp(-base$hazard * exp(lpi)))
+  })
 }
 
-# Covariates
-Sex <- sample(c("Male", "Female"), n, replace = TRUE)
-BloodType <- sample(c("A", "B", "AB", "O"), n, replace = TRUE)
+Q_A_cox <- compute_surv(lp_A, base_A)
+Q_B_cox <- compute_surv(lp_B, base_B)
 
-# Function to simulate one stage
-simulate_stage <- function(stage_num, Sex, BloodType) {
-  Treatment <- assign_treatments(n, c(0.5, 0.5))
-  TumorSize <- numeric(n)
-  TumorSize[Treatment == "A"] <- runif(sum(Treatment == "A"), 5, 6)
-  TumorSize[Treatment == "B"] <- runif(sum(Treatment == "B"), 3, 4)
-  treatment <- as.numeric(factor(Treatment, levels = c("A", "B"), labels = c(1, 0)))
-  
-  X_extra <- model.matrix(~ Sex + BloodType)[, -1]
-  beta_extra <- rep(0.05, ncol(X_extra))
-  survival <- 20 - 2 * TumorSize - treatment + X_extra %*% beta_extra + rnorm(n, 0, 0.5)
-  
-  data.table(
-    Treatment = Treatment,
-    TumorSize = TumorSize,
-    treatment = treatment,
-    Sex = Sex,
-    BloodType = BloodType,
-    survival = as.numeric(survival)
-  )
-}
 
-# Simulate all three stages
-stage1 <- simulate_stage(1, Sex, BloodType)
-stage2 <- simulate_stage(2, Sex, BloodType)
-stage3 <- simulate_stage(3, Sex, BloodType)
 
-# Introduce missingness
-set.seed(7777)
-stage1$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
-stage2$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
-stage3$TumorSize[sample(1:n, size = missing_rate * n)] <- NA
+# Add to data frame
+df$Q_A_bj <- Q_A_bj
+df$Q_B_bj <- Q_B_bj
+df$Q_A_cox <- Q_A_cox
+df$Q_B_cox <- Q_B_cox
 
-# Impute
-combined_cov <- rbind(
-  data.table(Stage = "1", TumorSize = stage1$TumorSize, treatment = stage1$treatment),
-  data.table(Stage = "2", TumorSize = stage2$TumorSize, treatment = stage2$treatment),
-  data.table(Stage = "3", TumorSize = stage3$TumorSize, treatment = stage3$treatment)
+# Prepare for plotting
+df_long <- pivot_longer(df,
+                        cols = c(Q_A_true, Q_A_bj, Q_A_cox, Q_B_true, Q_B_bj, Q_B_cox),
+                        names_to = "Model", values_to = "Q_value"
 )
-completed <- complete(mice(combined_cov, m = 5, method = "pmm", seed = 7777))
 
-# Restore imputed values
-stage1$TumorSize <- completed$TumorSize[combined_cov$Stage == "1"]
-stage1$treatment <- completed$treatment[combined_cov$Stage == "1"]
-stage2$TumorSize <- completed$TumorSize[combined_cov$Stage == "2"]
-stage2$treatment <- completed$treatment[combined_cov$Stage == "2"]
-stage3$TumorSize <- completed$TumorSize[combined_cov$Stage == "3"]
-stage3$treatment <- completed$treatment[combined_cov$Stage == "3"]
+# Add method and treatment group
+df_long$Method <- gsub("Q_[AB]_", "", df_long$Model)
+df_long$Treatment <- ifelse(grepl("Q_A_", df_long$Model), "A", "B")
 
-# Censoring
-censor <- runif(n, min = 5, max = 15)
-for (s in list(stage1, stage2, stage3)) {
-  s[, `:=`(
-    censored_time = pmin(survival, censor),
-    delta = as.numeric(survival <= censor)
-  )]
-}
+# Create x-axis grouping factor with custom order and labels
+df_long$TreatmentLabel <- factor(df_long$Model,
+                                 levels = c("Q_A_true", "Q_A_bj", "Q_A_cox", "Q_B_true", "Q_B_bj", "Q_B_cox"),
+                                 labels = c("A", "A", "A", "B", "B", "B")
+)
 
-# Buckley-James AFT
-bjaft <- function(dt, tol = 1e-3, max.iter = 100) {
-  Y <- dt$y
-  delta <- dt$delta
-  x <- model.matrix(~ TumorSize + treatment + Sex + BloodType, data = dt)[, -1]
-  old.beta <- lm(log(Y) ~ x)$coef[-1]
-  iter <- 0; err <- 10
-  while (iter < max.iter & err > tol) {
-    xbeta <- c(x %*% old.beta)
-    e <- log(Y) - xbeta
-    es <- sort(e)
-    sfit <- survfit(Surv(e, delta) ~ 1)
-    Fhat <- 1 - approx(x = sfit$time, y = sfit$surv, xout = es, rule = 2, ties = "ordered")$y
-    dF <- diff(c(0, Fhat))
-    denom <- 1 - Fhat
-    num <- rev(cumsum(rev(es * dF)))
-    Yimp <- (num / pmax(tol, denom))[rank(e)] + xbeta
-    Yhat <- log(Y) * delta + (1 - delta) * Yimp
-    new.beta <- lm(Yhat ~ x)$coef[-1]
-    err <- max(abs(new.beta - old.beta))
-    iter <- iter + 1
-    old.beta <- new.beta
-  }
-  list(Yhat = Yhat)
-}
+# Define fill colors and method labels
+df_long$Method <- factor(df_long$Method, levels = c("true", "bj", "cox"))
+colors <- c("true" = "#000066", "bj" = "#0000FF", "cox" = "#ADD8E6")
 
-BJ.1 <- exp(bjaft(stage1[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
-BJ.2 <- exp(bjaft(stage2[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
-BJ.3 <- exp(bjaft(stage3[, .(y = censored_time, delta, TumorSize, treatment, Sex, BloodType)])$Yhat)
+# Boxplot with custom x-axis labels
+ggplot(df_long, aes(x = TreatmentLabel, y = Q_value, fill = Method)) + 
+  geom_boxplot(alpha = 0.7, position = position_dodge(width = 0.8)) + 
+  labs(
+    title = "True vs Estimated Q-values",
+    x = "Treatment",
+    y = "Q-value",
+    fill = "Method"
+  ) + 
+  scale_fill_manual(values = colors, labels = c("True", "BJ-Q", "Cox-Q")) + 
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 18),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14)
+  )
 
-# Cox Imputation
-cox_imp <- function(data) {
-  fit <- coxph(Surv(censored_time, delta) ~ TumorSize + treatment + Sex + BloodType, data = data)
-  lp <- predict(fit, type = "lp")
-  base_surv <- basehaz(fit, centered = FALSE)
-  sapply(lp, function(lpv) sum(diff(c(0, base_surv$time)) * exp(-base_surv$hazard * exp(lpv))))
-}
 
-Cox.1 <- cox_imp(stage1)
-Cox.2 <- cox_imp(stage2)
-Cox.3 <- cox_imp(stage3)
 
-# Combine for testing
-true_total <- stage1$survival + stage2$survival + stage3$survival
-bj_total <- BJ.1 + BJ.2 + BJ.3
-cox_total <- Cox.1 + Cox.2 + Cox.3
 
-# Log-rank tests
-method_bj <- c(rep("True", n), rep("BJ-Q", n))
+# Compute true optimal treatment
+true_opt <- ifelse(df$Q_A_true > df$Q_B_true, 1, 0)
+
+# Estimated treatment decisions
+bj_opt <- ifelse(Q_A_bj > Q_B_bj, 1, 0)
+cox_opt <- ifelse(Q_A_cox > Q_B_cox, 1, 0)
+
+# Accuracy
+acc_bj <- mean(bj_opt == true_opt)
+acc_cox <- mean(cox_opt == true_opt)
+
+cat("BJ decision accuracy:  ", round(acc_bj, 4), "\n")
+cat("Cox decision accuracy: ", round(acc_cox, 4), "\n")
+
+
+# Total Q-values per subject for each method
+true_total <- ifelse(df$A == 1, df$Q_A_true, df$Q_B_true)
+bj_total   <- ifelse(df$A == 1, df$Q_A_bj,   df$Q_B_bj)
+cox_total  <- ifelse(df$A == 1, df$Q_A_cox,  df$Q_B_cox)
+
+# Group labels
+method_bj  <- c(rep("True", n), rep("BJ-Q",  n))
 method_cox <- c(rep("True", n), rep("Cox-Q", n))
 
-logrank_bj <- survdiff(Surv(c(true_total, bj_total), rep(1, 2 * n)) ~ method_bj)
+# Combine data and censoring (Q-values treated as observed)
+logrank_bj  <- survdiff(Surv(c(true_total, bj_total), rep(1, 2 * n)) ~ method_bj)
 logrank_cox <- survdiff(Surv(c(true_total, cox_total), rep(1, 2 * n)) ~ method_cox)
 
+# Print log-rank test results
 print(logrank_bj)
 print(logrank_cox)
 
+# Accuracy
+n_sim <- 50
 
-# Combine treatment labels
-treatment_comb <- paste0(stage1$Treatment, stage2$Treatment, stage3$Treatment)
+acc_bj_vec <- numeric(n_sim)
+acc_cox_vec <- numeric(n_sim)
 
-# Combine data for plotting
-plot_data <- data.table(
-  Treatment_Combination = treatment_comb,
-  True_Total = true_total,
-  BJ_Total = bj_total,
-  Cox_Total = cox_total
-)
+compute_surv <- function(lp, base) {
+  sapply(lp, function(lpi) {
+    sum(diff(c(0, base$time)) * exp(-base$hazard * exp(lpi)))
+  })
+}
 
-# Define common y-axis limits
-ymin <- min(c(plot_data$True_Total, plot_data$BJ_Total, plot_data$Cox_Total))
-ymax <- max(c(plot_data$True_Total, plot_data$BJ_Total, plot_data$Cox_Total))
+for (sim in 1:n_sim) {
+  Sex <- rbinom(n, 1, 0.5)
+  TumorSize <- runif(n, -1, 3)
+  
+  beta_0 <- 10
+  beta_1 <- 0.1
+  beta_2 <- -1
+  gamma_1 <- 0.01
+  gamma_2 <- 1.3
+  
+  Q_A_true <- beta_0 + beta_1 * Sex + beta_2 * TumorSize + gamma_1 + gamma_2 * TumorSize
+  Q_B_true <- beta_0 + beta_1 * Sex + beta_2 * TumorSize
+  
+  epsilon <- rnorm(n)
+  A <- rbinom(n, 1, 0.5)
+  T_true <- ifelse(A == 1, Q_A_true, Q_B_true) + epsilon
+  C <- runif(n, quantile(T_true, 0.2), quantile(T_true, 0.8))
+  Y <- pmin(T_true, C)
+  delta <- as.numeric(T_true <= C)
+  
+  df <- data.frame(Sex, TumorSize, A, T_obs = Y, delta, Q_A_true, Q_B_true)
+  df_A <- df[df$A == 1, ]
+  df_B <- df[df$A == 0, ]
+  
+  x_A <- as.matrix(df_A[, c("Sex", "TumorSize")])
+  x_B <- as.matrix(df_B[, c("Sex", "TumorSize")])
+  x_all <- as.matrix(df[, c("Sex", "TumorSize")])
+  
+  fit_A_bj <- bujar(y = log(df_A$T_obs), cens = df_A$delta, x = x_A, learner = "linear.regression", tuning = FALSE)
+  fit_B_bj <- bujar(y = log(df_B$T_obs), cens = df_B$delta, x = x_B, learner = "linear.regression", tuning = FALSE)
+  
+  Q_A_bj <- exp(predict(fit_A_bj, newx = x_all))
+  Q_B_bj <- exp(predict(fit_B_bj, newx = x_all))
+  
+  fit_A_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_A)
+  fit_B_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_B)
+  
+  lp_A <- predict(fit_A_cox, newdata = df, type = "lp")
+  lp_B <- predict(fit_B_cox, newdata = df, type = "lp")
+  
+  base_A <- basehaz(fit_A_cox, centered = FALSE)
+  base_B <- basehaz(fit_B_cox, centered = FALSE)
+  
+  Q_A_cox <- compute_surv(lp_A, base_A)
+  Q_B_cox <- compute_surv(lp_B, base_B)
+  
+  true_opt <- ifelse(df$Q_A_true > df$Q_B_true, 1, 0)
+  bj_opt   <- ifelse(Q_A_bj > Q_B_bj, 1, 0)
+  cox_opt  <- ifelse(Q_A_cox > Q_B_cox, 1, 0)
+  
+  acc_bj_vec[sim] <- mean(bj_opt == true_opt)
+  acc_cox_vec[sim] <- mean(cox_opt == true_opt)
+}
 
-# Plot 1: True survival
-p1 <- ggplot(plot_data, aes(x = Treatment_Combination, y = True_Total)) +
-  geom_boxplot(outlier.size = 0.3) +
-  labs(title = "True Survival", x = "Treatment Combination", y = "Survival Time") +
-  coord_cartesian(ylim = c(ymin, ymax)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+summary_bj <- summary(acc_bj_vec)
+summary_cox <- summary(acc_cox_vec)
 
-# Plot 2: BJ-Q imputed
-p2 <- ggplot(plot_data, aes(x = Treatment_Combination, y = BJ_Total)) +
-  geom_boxplot(outlier.size = 0.3) +
-  labs(title = "BJ-Q", x = "Treatment Combination", y = "Survival Time") +
-  coord_cartesian(ylim = c(ymin, ymax)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print("BJ-Q Decision Accuracy Summary:")
+print(summary_bj)
 
-# Plot 3: Cox-Q imputed
-p3 <- ggplot(plot_data, aes(x = Treatment_Combination, y = Cox_Total)) +
-  geom_boxplot(outlier.size = 0.3) +
-  labs(title = "Cox-Q", x = "Treatment Combination", y = "Survival Time") +
-  coord_cartesian(ylim = c(ymin, ymax)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-# Combine plots horizontally
-library(patchwork)
-combined_plot <- p1 + p2 + p3 + plot_layout(ncol = 3)
-print(combined_plot)
+print("Cox-Q Decision Accuracy Summary:")
+print(summary_cox)
 
