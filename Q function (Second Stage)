@@ -1,0 +1,235 @@
+# Load libraries
+library(bujar)
+library(survival)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Set seed
+set.seed(7777)
+n <- 1000
+
+# Function to simulate one stage
+simulate_stage <- function(beta0, beta1, beta2, gamma1, gamma2) {
+  Sex <- rbinom(n, 1, 0.5)
+  TumorSize <- runif(n, -1, 4)
+  Q_A_true <- beta0 + beta1 * Sex + beta2 * TumorSize + gamma1 + gamma2 * TumorSize
+  Q_B_true <- beta0 + beta1 * Sex + beta2 * TumorSize
+  epsilon <- rnorm(n)
+  A <- rbinom(n, 1, 0.5)
+  T_true <- ifelse(A == 1, Q_A_true, Q_B_true) + epsilon
+  C <- runif(n, quantile(T_true, 0.2), quantile(T_true, 0.8))
+  Y <- pmin(T_true, C)
+  delta <- as.numeric(T_true <= C)
+  data.frame(Sex, TumorSize, A, T_obs = Y, delta, Q_A_true, Q_B_true)
+}
+
+# Simulate two stages
+stage1 <- simulate_stage(10, 0.01, -1, 0.02, 1.2)
+stage2 <- simulate_stage(9, 0.01, -0.9, 0.02, 1.0)
+
+# Function to fit models and extract Q-values
+fit_models <- function(df) {
+  df_A <- df[df$A == 1, ]
+  df_B <- df[df$A == 0, ]
+  x_A <- as.matrix(df_A[, c("Sex", "TumorSize")])
+  x_B <- as.matrix(df_B[, c("Sex", "TumorSize")])
+  x_all <- as.matrix(df[, c("Sex", "TumorSize")])
+  
+  fit_A_bj <- bujar(y = log(df_A$T_obs), cens = df_A$delta, x = x_A,
+                    learner = "linear.regression", tuning = FALSE)
+  fit_B_bj <- bujar(y = log(df_B$T_obs), cens = df_B$delta, x = x_B,
+                    learner = "linear.regression", tuning = FALSE)
+  Q_A_bj <- exp(predict(fit_A_bj, newx = x_all))
+  Q_B_bj <- exp(predict(fit_B_bj, newx = x_all))
+  
+  fit_A_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_A)
+  fit_B_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_B)
+  lp_A <- predict(fit_A_cox, newdata = df, type = "lp")
+  lp_B <- predict(fit_B_cox, newdata = df, type = "lp")
+  base_A <- basehaz(fit_A_cox, centered = FALSE)
+  base_B <- basehaz(fit_B_cox, centered = FALSE)
+  
+  compute_surv <- function(lp, base) {
+    sapply(lp, function(lpi) {
+      sum(diff(c(0, base$time)) * exp(-base$hazard * exp(lpi)))
+    })
+  }
+  
+  Q_A_cox <- compute_surv(lp_A, base_A)
+  Q_B_cox <- compute_surv(lp_B, base_B)
+  
+  return(list(Q_A_bj = Q_A_bj, Q_B_bj = Q_B_bj,
+              Q_A_cox = Q_A_cox, Q_B_cox = Q_B_cox))
+}
+
+# Fit models
+q1 <- fit_models(stage1)
+q2 <- fit_models(stage2)
+
+# Compute true optimal decisions
+true_opt1 <- ifelse(stage1$Q_A_true > stage1$Q_B_true, 1, 0)
+true_opt2 <- ifelse(stage2$Q_A_true > stage2$Q_B_true, 1, 0)
+
+# Compute estimated optimal decisions
+bj_opt1 <- ifelse(q1$Q_A_bj > q1$Q_B_bj, 1, 0)
+bj_opt2 <- ifelse(q2$Q_A_bj > q2$Q_B_bj, 1, 0)
+cox_opt1 <- ifelse(q1$Q_A_cox > q1$Q_B_cox, 1, 0)
+cox_opt2 <- ifelse(q2$Q_A_cox > q2$Q_B_cox, 1, 0)
+
+# Accuracy calculation
+acc_bj_1 <- mean(bj_opt1 == true_opt1)
+acc_bj_2 <- mean(bj_opt2 == true_opt2)
+acc_bj_total <- mean((bj_opt1 == true_opt1) & (bj_opt2 == true_opt2))
+
+acc_cox_1 <- mean(cox_opt1 == true_opt1)
+acc_cox_2 <- mean(cox_opt2 == true_opt2)
+acc_cox_total <- mean((cox_opt1 == true_opt1) & (cox_opt2 == true_opt2))
+
+# Create accuracy summary
+df_accuracy <- data.frame(
+  Stage = c("Stage 1", "Stage 2", "Cumulative"),
+  BJ_Q = c(acc_bj_1, acc_bj_2, acc_bj_total),
+  Cox_Q = c(acc_cox_1, acc_cox_2, acc_cox_total)
+)
+
+df_accuracy
+
+
+
+# Treatment combination labels
+treat_labels <- function(a1, a2) {
+  paste0(ifelse(a1 == 1, "A", "B"), ifelse(a2 == 1, "A", "B"))
+}
+treat_combo <- treat_labels(stage1$A, stage2$A)
+
+# Compute true Q-values
+Q_true <- ifelse(stage1$A == 1, stage1$Q_A_true, stage1$Q_B_true) +
+  ifelse(stage2$A == 1, stage2$Q_A_true, stage2$Q_B_true)
+
+# Cumulative predicted Q-values
+Q_bj <- q1$Q_A_bj * (stage1$A == 1) + q1$Q_B_bj * (stage1$A == 0) +
+  q2$Q_A_bj * (stage2$A == 1) + q2$Q_B_bj * (stage2$A == 0)
+
+Q_cox <- q1$Q_A_cox * (stage1$A == 1) + q1$Q_B_cox * (stage1$A == 0) +
+  q2$Q_A_cox * (stage2$A == 1) + q2$Q_B_cox * (stage2$A == 0)
+
+# Combine data
+df_cum <- data.frame(
+  combo = treat_combo,
+  True_Q = Q_true,
+  BJ_Q = Q_bj,
+  Cox_Q = Q_cox
+)
+
+# Reshape for plotting
+df_long <- pivot_longer(df_cum,
+                        cols = c("True_Q", "BJ_Q", "Cox_Q"),
+                        names_to = "Method",
+                        values_to = "Cumulative_Q")
+
+# Set factor levels for correct order in the legend and plot
+df_long$Method <- factor(df_long$Method,
+                         levels = c("True_Q", "BJ_Q", "Cox_Q"),
+                         labels = c("True", "BJ-Q", "Cox-Q"))
+
+# Boxplot
+ggplot(df_long, aes(x = combo, y = Cumulative_Q, fill = Method)) +
+  geom_boxplot(alpha = 0.7, position = position_dodge(width = 0.8)) +
+  labs(
+    title = "True vs Estimated Q-values",
+    x = "Treatment Combination (Stage 1 + Stage 2)",
+    y = "Cumulative Q-value",
+    fill = "Method"
+  ) +
+  scale_fill_manual(
+    values = c("True" = "#000066", "BJ-Q" = "#0000FF", "Cox-Q" = "#ADD8E6"),
+    labels = c("True", "BJ-Q", "Cox-Q")
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 16, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 18, face = "bold"),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14)
+  )
+
+
+set.seed(7777)
+
+
+# Simulation and accuracy wrapper
+simulate_accuracy <- function(n = 1000) {
+  simulate_stage <- function(beta0, beta1, beta2, gamma1, gamma2) {
+    Sex <- rbinom(n, 1, 0.5)
+    TumorSize <- runif(n, -1, 4)
+    Q_A_true <- beta0 + beta1 * Sex + beta2 * TumorSize + gamma1 + gamma2 * TumorSize
+    Q_B_true <- beta0 + beta1 * Sex + beta2 * TumorSize
+    epsilon <- rnorm(n)
+    A <- rbinom(n, 1, 0.5)
+    T_true <- ifelse(A == 1, Q_A_true, Q_B_true) + epsilon
+    C <- runif(n, quantile(T_true, 0.2), quantile(T_true, 0.8))
+    Y <- pmin(T_true, C)
+    delta <- as.numeric(T_true <= C)
+    data.frame(Sex, TumorSize, A, T_obs = Y, delta, Q_A_true, Q_B_true)
+  }
+  
+  fit_models <- function(df) {
+    df_A <- df[df$A == 1, ]
+    df_B <- df[df$A == 0, ]
+    x_A <- as.matrix(df_A[, c("Sex", "TumorSize")])
+    x_B <- as.matrix(df_B[, c("Sex", "TumorSize")])
+    x_all <- as.matrix(df[, c("Sex", "TumorSize")])
+    fit_A_bj <- bujar(y = log(df_A$T_obs), cens = df_A$delta, x = x_A, learner = "linear.regression", tuning = FALSE)
+    fit_B_bj <- bujar(y = log(df_B$T_obs), cens = df_B$delta, x = x_B, learner = "linear.regression", tuning = FALSE)
+    Q_A_bj <- exp(predict(fit_A_bj, newx = x_all))
+    Q_B_bj <- exp(predict(fit_B_bj, newx = x_all))
+    fit_A_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_A)
+    fit_B_cox <- coxph(Surv(T_obs, delta) ~ Sex + TumorSize, data = df_B)
+    lp_A <- predict(fit_A_cox, newdata = df, type = "lp")
+    lp_B <- predict(fit_B_cox, newdata = df, type = "lp")
+    base_A <- basehaz(fit_A_cox, centered = FALSE)
+    base_B <- basehaz(fit_B_cox, centered = FALSE)
+    compute_surv <- function(lp, base) {
+      sapply(lp, function(lpi) {
+        sum(diff(c(0, base$time)) * exp(-base$hazard * exp(lpi)))
+      })
+    }
+    Q_A_cox <- compute_surv(lp_A, base_A)
+    Q_B_cox <- compute_surv(lp_B, base_B)
+    list(Q_A_bj = Q_A_bj, Q_B_bj = Q_B_bj, Q_A_cox = Q_A_cox, Q_B_cox = Q_B_cox)
+  }
+  
+  # simulate stages
+  stage1 <- simulate_stage(10, 0.01, -1, 0.02, 1.2)
+  stage2 <- simulate_stage(9, 0.01, -0.9, 0.02, 1.0)
+  q1 <- fit_models(stage1)
+  q2 <- fit_models(stage2)
+  
+  true_opt1 <- ifelse(stage1$Q_A_true > stage1$Q_B_true, 1, 0)
+  true_opt2 <- ifelse(stage2$Q_A_true > stage2$Q_B_true, 1, 0)
+  
+  bj_opt1 <- ifelse(q1$Q_A_bj > q1$Q_B_bj, 1, 0)
+  bj_opt2 <- ifelse(q2$Q_A_bj > q2$Q_B_bj, 1, 0)
+  acc_bj_1 <- mean(bj_opt1 == true_opt1)
+  acc_bj_2 <- mean(bj_opt2 == true_opt2)
+  acc_bj_total <- mean((bj_opt1 == true_opt1) & (bj_opt2 == true_opt2))
+  
+  cox_opt1 <- ifelse(q1$Q_A_cox > q1$Q_B_cox, 1, 0)
+  cox_opt2 <- ifelse(q2$Q_A_cox > q2$Q_B_cox, 1, 0)
+  acc_cox_1 <- mean(cox_opt1 == true_opt1)
+  acc_cox_2 <- mean(cox_opt2 == true_opt2)
+  acc_cox_total <- mean((cox_opt1 == true_opt1) & (cox_opt2 == true_opt2))
+  
+  c(acc_bj_1, acc_bj_2, acc_bj_total, acc_cox_1, acc_cox_2, acc_cox_total)
+}
+
+# Run 100 replicates
+res <- replicate(100, simulate_accuracy())
+res_df <- as.data.frame(t(res))
+colnames(res_df) <- c("BJ_Stage1", "BJ_Stage2", "BJ_Cumulative", 
+                      "Cox_Stage1", "Cox_Stage2", "Cox_Cumulative")
+summary(res_df)
