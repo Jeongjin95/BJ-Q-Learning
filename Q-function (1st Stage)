@@ -3,8 +3,6 @@ library(survival)
 library(ggplot2)
 library(tidyr)
 
-set.seed(1234)
-
 # Sample size and covariates
 n <- 1000
 Sex <- rbinom(n, 1, 0.5)
@@ -68,8 +66,6 @@ compute_surv <- function(lp, base) {
 Q_A_cox <- compute_surv(lp_A, base_A)
 Q_B_cox <- compute_surv(lp_B, base_B)
 
-
-
 # Add to data frame
 df$Q_A_bj <- Q_A_bj
 df$Q_B_bj <- Q_B_bj
@@ -117,9 +113,6 @@ ggplot(df_long, aes(x = TreatmentLabel, y = Q_value, fill = Method)) +
     legend.text = element_text(size = 14)
   )
 
-
-
-
 # Compute true optimal treatment
 true_opt <- ifelse(df$Q_A_true > df$Q_B_true, 1, 0)
 
@@ -153,7 +146,7 @@ print(logrank_bj)
 print(logrank_cox)
 
 # Accuracy
-n_sim <- 50
+n_sim <- 100
 
 acc_bj_vec <- numeric(n_sim)
 acc_cox_vec <- numeric(n_sim)
