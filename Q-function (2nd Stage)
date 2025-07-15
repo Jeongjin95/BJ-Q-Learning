@@ -5,8 +5,6 @@ library(ggplot2)
 library(tidyr)
 library(dplyr)
 
-# Set seed
-set.seed(7777)
 n <- 1000
 
 # Function to simulate one stage
@@ -95,8 +93,6 @@ df_accuracy <- data.frame(
 
 df_accuracy
 
-
-
 # Treatment combination labels
 treat_labels <- function(a1, a2) {
   paste0(ifelse(a1 == 1, "A", "B"), ifelse(a2 == 1, "A", "B"))
@@ -156,10 +152,6 @@ ggplot(df_long, aes(x = combo, y = Cumulative_Q, fill = Method)) +
     legend.title = element_text(size = 16),
     legend.text = element_text(size = 14)
   )
-
-
-set.seed(7777)
-
 
 # Simulation and accuracy wrapper
 simulate_accuracy <- function(n = 1000) {
