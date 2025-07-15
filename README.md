@@ -1,7 +1,6 @@
 # Counterfactual Q-Learning via the Linear Buckley–James Method for Longitudinal Survival Data
 
 **Authors:** Jeongjin Lee and Jong-Min Kim
+
 **Accepted in JRSS A (Journal of the Royal Statistical Society: Series A)**
 
-## Abstract
-Treatment strategies are critical in healthcare, particularly when outcomes are subject to censoring. This study introduces the Counterfactual Buckley-James Q-Learning framework, which integrates the Buckley-James method with reinforcement learning to address challenges posed by censored survival data. The Buckley-James method imputes censored survival times via conditional expectations based on observed data, offering a robust mechanism for handling incomplete outcomes. By incorporating these imputed values into a counterfactual Q-learning framework, the proposed method enables the estimation and comparison of potential outcomes under different treatment strategies. This facilitates the identification of optimal dynamic treatment regimes that maximize expected survival time. Through extensive simulation studies, the method demonstrates robust performance across various sample sizes and censoring scenarios, including right censoring and missing at random (MAR). Application to real-world clinical trial data further highlights the utility of this approach in informing personalized treatment decisions, providing an interpretable and reliable tool for optimizing survival outcomes in complex clinical settings.
